@@ -46,6 +46,7 @@ func _refresh() -> void:
 func _toggle_sound() -> void:
 	SaveData.sound_on = not SaveData.sound_on
 	SaveData.save()
+	Sfx.apply_settings()
 	_refresh()
 
 

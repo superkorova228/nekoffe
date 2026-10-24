@@ -1,6 +1,6 @@
 class_name MenuScreen
 extends Control
-## Главное меню: тап в любом месте = играть. Кнопки по углам: настройки, "?" (обучение).
+## Главное меню: тап в любом месте = играть. По углам: монеты, настройки, помощь.
 ## Кот и камера живут в игровой сцене (main.gd), здесь только интерфейс поверх.
 
 signal play_pressed
@@ -29,19 +29,29 @@ func _ready() -> void:
 	var col := VBoxContainer.new()
 	margin.add_child(UIKit.pass_through(col))
 
+	# верхний ряд: монеты (иконка + число) слева, настройки справа
 	var top := HBoxContainer.new()
 	col.add_child(UIKit.pass_through(top))
-	var coin_label := UIKit.label("COINS  %d" % coins, 54, UIKit.GOLD)
+	var coin_box := HBoxContainer.new()
+	coin_box.add_theme_constant_override("separation", 14)
+	coin_box.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	coin_box.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	top.add_child(UIKit.pass_through(coin_box))
+	var coin_icon: Control = UIKit.coin_icon(100.0)
+	coin_icon.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	coin_box.add_child(coin_icon)
+	var coin_label := UIKit.label("%d" % coins, 60, UIKit.GOLD)
 	coin_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_LEFT
-	coin_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	coin_label.size_flags_vertical = Control.SIZE_SHRINK_CENTER
-	top.add_child(coin_label)
-	var settings := UIKit.button("Settings", Vector2(290, 100), 44)
+	coin_box.add_child(coin_label)
+	var settings := UIKit.icon_button("settings", "Set")
 	settings.pressed.connect(func() -> void: settings_pressed.emit())
 	top.add_child(settings)
+	var help := UIKit.icon_button("help", "?")
+	help.pressed.connect(func() -> void: help_pressed.emit())
+	top.add_child(help)
 
 	col.add_child(UIKit.spacer(50))
-	var title := UIKit.label("Nek0kofe", 150, Color(), false)
+	var title := UIKit.label("Nek0kofE", 150, Color(), false)
 	title.add_theme_font_override("font", Fonts.title())   # отдельный шрифт для названия
 	col.add_child(title)
 	col.add_child(UIKit.spacer(30))
@@ -55,9 +65,7 @@ func _ready() -> void:
 
 	var bottom := HBoxContainer.new()
 	col.add_child(UIKit.pass_through(bottom))
-	var help := UIKit.button("?", Vector2(120, 120), 72)
-	help.pressed.connect(func() -> void: help_pressed.emit())
-	bottom.add_child(help)
+
 
 
 func _process(delta: float) -> void:

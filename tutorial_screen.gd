@@ -164,8 +164,16 @@ func _art_jump(c: Vector2) -> void:
 		draw_polyline(warn, UIKit.DARK, 6.0)
 	var bx: float = lerpf(c.x - 440.0, c.x + 440.0, ph)
 	var bp := Vector2(bx, floor_y - 46.0)
-	draw_circle(bp, 46.0, Color(0.23, 0.14, 0.09))
-	draw_arc(bp, 43.0, 0.0, TAU, 40, Color(0.9, 0.28, 0.3), 6.0)
+	var barrel: Texture2D = UIKit.art_texture("barrel")
+	if barrel != null:
+		draw_set_transform(bp, bx / 46.0, Vector2.ONE)
+		var bts: Vector2 = barrel.get_size()
+		var bsz: Vector2 = bts * (92.0 / maxf(bts.x, bts.y))
+		draw_texture_rect(barrel, Rect2(-bsz * 0.5, bsz), false)
+		draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+	else:
+		draw_circle(bp, 46.0, Color(0.23, 0.14, 0.09))
+		draw_arc(bp, 43.0, 0.0, TAU, 40, Color(0.9, 0.28, 0.3), 6.0)
 	var a: float = 0.5 + 0.5 * sin(_t * 6.0)
 	var ay: float = c.y - 90.0 - lift * 0.3
 	draw_polyline(PackedVector2Array([Vector2(c.x - 50.0, ay + 30.0), Vector2(c.x, ay - 10.0), Vector2(c.x + 50.0, ay + 30.0)]), Color(1, 1, 1, a), 10.0)
@@ -174,16 +182,30 @@ func _art_jump(c: Vector2) -> void:
 func _art_patience(c: Vector2) -> void:
 	var ratio: float = 1.0 - fposmod(_t * 0.25, 1.0)
 	var client_col: Color = Color("b8b8b8").lerp(Color("e5484d"), clampf(inverse_lerp(0.5, 0.1, ratio), 0.0, 1.0))
-	draw_circle(Vector2(c.x, c.y - 170.0), 80.0, client_col)
-	draw_circle(Vector2(c.x - 26.0, c.y - 184.0), 9.0, UIKit.DARK)
-	draw_circle(Vector2(c.x + 26.0, c.y - 184.0), 9.0, UIKit.DARK)
+	var client: Texture2D = UIKit.art_texture("client2")   # лицо клиента из спрайта (res://art/client2.png)
+	if client != null:
+		var tint: Color = Color.WHITE.lerp(Color(1.0, 0.45, 0.45), clampf(inverse_lerp(0.5, 0.1, ratio), 0.0, 1.0))
+		var cts: Vector2 = client.get_size()
+		var csz: Vector2 = cts * (190.0 / maxf(cts.x, cts.y))
+		draw_texture_rect(client, Rect2(Vector2(c.x, c.y - 170.0) - csz * 0.5, csz), false, tint)
+	else:
+		draw_circle(Vector2(c.x, c.y - 170.0), 80.0, client_col)
+		draw_circle(Vector2(c.x - 26.0, c.y - 184.0), 9.0, UIKit.DARK)
+		draw_circle(Vector2(c.x + 26.0, c.y - 184.0), 9.0, UIKit.DARK)
 	var bar := Rect2(c.x - 300.0, c.y - 40.0, 600.0, 40.0)
 	draw_rect(bar, Color(1, 1, 1, 0.2))
 	var pc: Color = Color("5bb98c").lerp(Color("e5484d"), clampf(inverse_lerp(0.6, 0.15, ratio), 0.0, 1.0))
 	draw_rect(Rect2(bar.position, Vector2(bar.size.x * ratio, bar.size.y)), pc)
+	var heart: Texture2D = UIKit.art_texture("heart")
 	for h in 3:
-		var hc: Color = Color("e5484d") if h < 2 or ratio > 0.2 else Color(1, 1, 1, 0.2)
-		draw_circle(Vector2(c.x + (h - 1) * 110.0, c.y + 150.0), 40.0, hc)
+		var alive: bool = h < 2 or ratio > 0.2
+		var hp := Vector2(c.x + (h - 1) * 110.0, c.y + 150.0)
+		if heart != null:
+			var ts: Vector2 = heart.get_size()
+			var sz: Vector2 = ts * (90.0 / maxf(ts.x, ts.y))
+			draw_texture_rect(heart, Rect2(hp - sz * 0.5, sz), false, Color.WHITE if alive else Color(0.3, 0.3, 0.3, 0.6))
+		else:
+			draw_circle(hp, 40.0, Color("e5484d") if alive else Color(1, 1, 1, 0.2))
 
 
 func _cat(feet: Vector2, lift: float) -> void:

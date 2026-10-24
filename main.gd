@@ -17,6 +17,7 @@ const CAT_W := 150.0
 const CAT_H := 300.0
 const TOWER_LIFT := 0.0          # на сколько px поднять башню над головой (минус = ниже)
 const TOWER_STEP := 40.0
+const HEART_SIZE := 56.0         # размер сердца-жизни в HUD, px
 const BG_TILE_SCALE := 1.0       # размер плитки обоев (1.0 = как в файле, 0.5 = вдвое мельче)
 const FLOOR_TILE_SCALE := 0.25    # то же для пола
 const SHOW_CATCH_LINE := false
@@ -41,6 +42,7 @@ const UNLOCK_EVERY := 4       # новый ингредиент каждые N �
 const HEAL_EVERY_COMBO := 4
 
 const BARREL_R := 46.0
+const BARREL_SPRITE_K := 1.5     # размер спрайта бочки относительно BARREL_R (1.0 = диаметр 2*BARREL_R)
 const BARREL_FROM_ORDER := 3
 const BARREL_EVERY_START := 6.0
 const BARREL_EVERY_MIN := 3.2
@@ -58,8 +60,8 @@ const CAT_FEET_SINK := 12.0       # на сколько px кот "провал�
 const CLIENT_SPRITE := 190.0      # размер клиента в облачке
 const ING_FILES := {0: "coffee", 1: "milk", 2: "blueberry", 3: "strawberry", 4: "caramel", 5: "chocolate", 6: "marshmallow", 7: "vanilla"}
 
-const MENU_ZOOM := 1.5            # во сколько раз камера приближена в меню
-const MENU_CAM_BOTTOM := 700.0    # центр кадра меню: столько px от нижнего края
+const MENU_ZOOM := 2.5            # во сколько раз камера приближена в меню
+const MENU_CAM_BOTTOM := 100.0    # центр кадра меню: столько px от нижнего края
 const WAKE_TIME := 0.5            # кот подпрыгивает при пробуждении, сек
 
 class Item:
@@ -134,7 +136,11 @@ var over_earned: int = 0
 var over_record: bool = false
 var ing_tex: Dictionary = {}
 var cat_tex: Texture2D = null
+var barrel_tex: Texture2D = null
 var cat_closed_tex: Texture2D = null
+var heart_tex: Texture2D = null
+var heart_empty_tex: Texture2D = null
+var pause_icon_tex: Texture2D = null
 var bg_tex: Texture2D = null
 var floor_tex: Texture2D = null
 var client_texs: Array = []
@@ -186,8 +192,12 @@ func load_art() -> void:
 			ing_tex[k] = load(path)
 	if ResourceLoader.exists("res://art/cat.png"):
 		cat_tex = load("res://art/cat.png") as Texture2D
+		barrel_tex = UIKit.art_texture("barrel")   # res://art/barrel.png
 		if ResourceLoader.exists("res://art/cat_closed.png"):
 			cat_closed_tex = load("res://art/cat_closed.png") as Texture2D
+		heart_tex = UIKit.art_texture("heart")              # res://art/heart.png
+		heart_empty_tex = UIKit.art_texture("heart_empty")  # необязательно: пустое сердце
+		pause_icon_tex = UIKit.art_texture("icon_pause")    # res://art/icon_pause.png
 		if ResourceLoader.exists("res://art/background.png"):
 			bg_tex = load("res://art/background.png") as Texture2D
 		if ResourceLoader.exists("res://art/floor.png"):
@@ -247,6 +257,7 @@ func pause_game() -> void:
 	state = State.PAUSED
 	state_time = 0.0
 	touch_active = false
+	snd.music_pause(true)
 	sfx("click")
 	var p := PauseScreen.new()
 	p.resumed.connect(resume_game)
@@ -264,6 +275,7 @@ func resume_game() -> void:
 	state_time = 0.0
 	touch_active = false
 	invuln_t = maxf(invuln_t, 0.6)   # короткая страховка после паузы
+	snd.music_pause(false)
 	sfx("click")
 
 
@@ -308,6 +320,7 @@ func show_menu(instant: bool = false) -> void:
 	state = State.MENU
 	state_time = 0.0
 	wake_t = -1.0
+	snd.menu_audio_start()
 	if instant:
 		snap_cam_menu()
 	else:
@@ -376,6 +389,7 @@ func on_tutorial_finished(first_run: bool) -> void:
 
 func show_game_over() -> void:
 	over_shown = true
+	sfx("over")
 	var g := GameOverScreen.new()
 	g.data = {
 		"score": score,
@@ -475,7 +489,7 @@ func top_h() -> float:
 ## инпут
 func pause_rect() -> Rect2:
 	var vp: Vector2 = get_viewport_rect().size
-	return Rect2(vp.x - 150.0, 25.0 + ui_off, 110.0, 110.0)
+	return Rect2(vp.x - 40.0 - UIKit.ICON_BTN, 8.0 + ui_off, UIKit.ICON_BTN, UIKit.ICON_BTN)
 
 
 func _input(event: InputEvent) -> void:
@@ -537,6 +551,7 @@ func try_jump() -> void:
 ## состояния игры
 func start_shift() -> void:
 	clear_screens()
+	snd.game_audio_start()
 	lives = START_LIVES
 	run_coins = 0
 	over_shown = false
@@ -562,7 +577,6 @@ func start_shift() -> void:
 	new_order()
 	state = State.PLAYING
 	state_time = 0.0
-	sfx("start")
 
 
 func end_game() -> void:
@@ -571,7 +585,7 @@ func end_game() -> void:
 	over_shown = false
 	over_earned = run_coins
 	over_record = bank_run()
-	sfx("over")
+	snd.music_fade_out()
 
 
 func new_order() -> void:
@@ -1056,7 +1070,7 @@ func draw_sleep_z(top: float) -> void:
 	for i in 3:
 		var ph: float = fposmod(t * 0.45 + i / 3.0, 1.0)
 		var pos := Vector2(cat_x + 50.0 + ph * 70.0 + sin(ph * 6.0) * 10.0, top - 20.0 - ph * 150.0)
-		text_at("Z", pos, 40 + int(ph * 36.0), Color(1, 1, 1, sin(ph * PI)), HORIZONTAL_ALIGNMENT_LEFT, -1.0, true)
+		text_at("Z", pos, 40 + int(ph * 36.0), Color(0.0, 0.0, 0.0, 0.392), HORIZONTAL_ALIGNMENT_LEFT, -1.0, false)
 
 
 func draw_barrels() -> void:
@@ -1072,6 +1086,11 @@ func draw_barrels() -> void:
 			draw_colored_polygon(tri, Color(0.94, 0.63, 0.12, a))
 			draw_polyline(tri, col_dark, 6.0)
 			text_at("!", Vector2(c.x - 100.0, c.y + 28.0), 64, col_dark, HORIZONTAL_ALIGNMENT_CENTER, 200.0, false)
+		elif barrel_tex != null:
+			# спрайт бочки: катится и вращается вокруг центра картинки
+			draw_set_transform(Vector2(b.x, fy - BARREL_R), b.x / BARREL_R, Vector2.ONE)
+			draw_fit(barrel_tex, Vector2.ZERO, BARREL_R * 2.0 * BARREL_SPRITE_K, Color(1, 1, 1, 0.35 if b.hit else 1.0))
+			draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 		else:
 			var pos := Vector2(b.x, fy - BARREL_R)
 			var al: float = 0.35 if b.hit else 1.0
@@ -1151,16 +1170,28 @@ func draw_hud() -> void:
 	var o: float = ui_off
 	draw_rect(Rect2(-60, -60, vp.x + 120, 180 + o), col_dark)
 	for h in 3:
-		var hc: Color = col_heart if h < lives else Color(1, 1, 1, 0.15)
-		draw_circle(Vector2(70 + h * 60, 60 + o), 22, hc)
+		var hp := Vector2(70 + h * 60, 60 + o)
+		if heart_tex != null:
+			if h < lives:
+				draw_fit(heart_tex, hp, HEART_SIZE)
+			elif heart_empty_tex != null:
+				draw_fit(heart_empty_tex, hp, HEART_SIZE)
+			else:
+				draw_fit(heart_tex, hp, HEART_SIZE, Color(0.25, 0.25, 0.25, 0.55))
+		else:
+			var hc: Color = col_heart if h < lives else Color(1, 1, 1, 0.15)
+			draw_circle(hp, 22, hc)
 	text_at(str(score), Vector2(0, 88 + o), 72, Color.WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x, false)
 	if combo >= 2:
 		text_at("x%d" % mini(combo, 5), Vector2(0, 88 + o), 64, Color("f2b705"), HORIZONTAL_ALIGNMENT_RIGHT, vp.x - 180.0, false)
 	# кнопка паузы (касание обрабатывается в _input)
 	var pr: Rect2 = pause_rect()
 	draw_rect(pr, Color(1, 1, 1, 0.12))
-	draw_rect(Rect2(pr.position + Vector2(34, 28), Vector2(16, 54)), Color.WHITE)
-	draw_rect(Rect2(pr.position + Vector2(60, 28), Vector2(16, 54)), Color.WHITE)
+	if pause_icon_tex != null:
+		draw_fit(pause_icon_tex, pr.get_center(), pr.size.x - 2.0 * UIKit.ICON_MARGIN)
+	else:
+		draw_rect(Rect2(pr.position + Vector2(34, 28), Vector2(16, 54)), Color.WHITE)
+		draw_rect(Rect2(pr.position + Vector2(60, 28), Vector2(16, 54)), Color.WHITE)
 
 
 func text_at(s: String, pos: Vector2, size: int, col: Color, align: HorizontalAlignment, width: float, outline: bool) -> void:
