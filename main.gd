@@ -1,5 +1,6 @@
 extends Node2D
 ## управление: a/d - влево/вправо, w/пробел - прыжочек, тоже самое со стрелками
+## Esc или P - пауза (на телефоне: кнопка паузы справа вверху и системная кнопка «Назад»)
 ## либо свайпами мышкой
 
 enum State { MENU, PLAYING, GAME_OVER, PAUSED }
@@ -13,8 +14,11 @@ const ITEM_R := 48.0
 const TOP_UI_H := 380.0
 const FLOOR_H := 190.0
 const CAT_W := 150.0
-const CAT_H := 170.0
+const CAT_H := 300.0
+const TOWER_LIFT := 0.0          # на сколько px поднять башню над головой (минус = ниже)
 const TOWER_STEP := 40.0
+const BG_TILE_SCALE := 1.0       # размер плитки обоев (1.0 = как в файле, 0.5 = вдвое мельче)
+const FLOOR_TILE_SCALE := 0.25    # то же для пола
 const SHOW_CATCH_LINE := false
 const DEBUG_INSET := 0.0         # >0 = эмулировать вырез камеры на ПК (попробуй 90)
 
@@ -49,9 +53,14 @@ const INVULN_TIME := 1.2
 const FAIR_WINDOW := 0.6
 
 const SPRITE_K := 2.3             # размер спрайта ингредиента относительно радиуса
-const CAT_SPRITE_EXTRA := 36.0    # спрайт кота = CAT_H + это (уши)
+const CAT_SPRITE_EXTRA := 0.0     # спрайт кота = CAT_H + это (уши)
+const CAT_FEET_SINK := 12.0       # на сколько px кот "проваливается" в пол (только картинка)
 const CLIENT_SPRITE := 190.0      # размер клиента в облачке
-const ING_FILES := {0: "coffee", 1: "milk", 3: "strawberry", 5: "chocolate", 6: "marshmallow"}
+const ING_FILES := {0: "coffee", 1: "milk", 2: "blueberry", 3: "strawberry", 4: "caramel", 5: "chocolate", 6: "marshmallow", 7: "vanilla"}
+
+const MENU_ZOOM := 1.5            # во сколько раз камера приближена в меню
+const MENU_CAM_BOTTOM := 700.0    # центр кадра меню: столько px от нижнего края
+const WAKE_TIME := 0.5            # кот подпрыгивает при пробуждении, сек
 
 class Item:
 	var lane: int = 0
@@ -92,7 +101,7 @@ var patience_max: float = 10.0
 var order_perfect: bool = true
 var lives: int = START_LIVES
 var score: int = 0
-var best_score: int = 0
+var run_coins: int = 0              # монеты, заработанные за текущую смену
 var orders_done: int = 0
 var combo: int = 0
 var best_combo: int = 0
@@ -113,9 +122,21 @@ var invuln_t: float = 0.0
 var ing_a: float = 1.0
 var client_t: float = 0.0
 var ui_off: float = 0.0          # отступ сверху под вырез камеры
-var sfx_players: Dictionary = {}
+var snd: Sfx                     # звуки (sfx.gd)
+var ui: CanvasLayer              # слой для экранов меню/паузы/конца
+var cam: Camera2D
+var cam_tween: Tween
+var screen: Control = null       # текущий экран (меню / пауза / конец)
+var overlay: Control = null      # настройки / туториал поверх меню
+var wake_t: float = -1.0         # анимация пробуждения кота
+var over_shown: bool = false
+var over_earned: int = 0
+var over_record: bool = false
 var ing_tex: Dictionary = {}
 var cat_tex: Texture2D = null
+var cat_closed_tex: Texture2D = null
+var bg_tex: Texture2D = null
+var floor_tex: Texture2D = null
 var client_texs: Array = []
 var client_idx: int = 0
 
@@ -136,11 +157,26 @@ var col_line := Color("f0a020")
 
 func _ready() -> void:
 	load_art()
-	setup_audio()
+	snd = Sfx.new()
+	add_child(snd)
+	ui = CanvasLayer.new()
+	ui.layer = 10
+	add_child(ui)
+	cam = Camera2D.new()
+	add_child(cam)
 	update_safe_area()
-	get_viewport().size_changed.connect(update_safe_area)
+	get_viewport().size_changed.connect(_on_resized)
 	cat_x = lane_cx(lane)
 	new_order()
+	show_menu(true)
+
+
+func _on_resized() -> void:
+	update_safe_area()
+	if state == State.MENU:
+		snap_cam_menu()
+	else:
+		snap_cam_game()
 
 
 func load_art() -> void:
@@ -150,11 +186,22 @@ func load_art() -> void:
 			ing_tex[k] = load(path)
 	if ResourceLoader.exists("res://art/cat.png"):
 		cat_tex = load("res://art/cat.png") as Texture2D
+		if ResourceLoader.exists("res://art/cat_closed.png"):
+			cat_closed_tex = load("res://art/cat_closed.png") as Texture2D
+		if ResourceLoader.exists("res://art/background.png"):
+			bg_tex = load("res://art/background.png") as Texture2D
+		if ResourceLoader.exists("res://art/floor.png"):
+			floor_tex = load("res://art/floor.png") as Texture2D
 	for i in range(1, 10):
 		var cp: String = "res://art/client%d.png" % i
 		if ResourceLoader.exists(cp):
 			client_texs.append(load(cp) as Texture2D)
 
+## Заливает прямоугольник бесшовной текстурой; плитка начинается от угла rect
+func draw_tiled(tex: Texture2D, rect: Rect2, tile_scale: float) -> void:
+	draw_set_transform(rect.position, 0.0, Vector2(tile_scale, tile_scale))
+	draw_texture_rect(tex, Rect2(Vector2.ZERO, rect.size / tile_scale), true)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
 ## рисует текстуру по центру pos, вписывая в квадрат size x size с сохранением пропорций
 func draw_fit(tex: Texture2D, pos: Vector2, size: float, mod: Color = Color.WHITE) -> void:
@@ -162,80 +209,249 @@ func draw_fit(tex: Texture2D, pos: Vector2, size: float, mod: Color = Color.WHIT
 	var sz: Vector2 = ts * (size / maxf(ts.x, ts.y))
 	draw_texture_rect(tex, Rect2(pos - sz * 0.5, sz), false, mod)
 
-## звук, в дальнейшем замениться на мп3 или вав или ещё какие-нибудь файлы
-func tone_wav(freqs: Array, dur: float, vol: float, sweep: float, noise: float) -> AudioStreamWAV:
-	var rate: int = 22050
-	var data := PackedByteArray()
-	var n: int = int(rate * dur)
-	for f in freqs:
-		var chunk := PackedByteArray()
-		chunk.resize(n * 2)
-		var phase: float = 0.0
-		for i in n:
-			var t: float = float(i) / rate
-			var x: float = float(i) / n
-			var env: float = minf(1.0, float(i) / (rate * 0.004)) * pow(1.0 - x, 1.5)
-			phase += TAU * (float(f) + sweep * t) / rate
-			var s: float = sin(phase)
-			if noise > 0.0:
-				s = lerpf(s, randf() * 2.0 - 1.0, noise)
-			var v: int = int(clampf(s * env * vol, -1.0, 1.0) * 32767.0)
-			chunk.encode_s16(i * 2, v)
-		data.append_array(chunk)
-	var w := AudioStreamWAV.new()
-	w.format = AudioStreamWAV.FORMAT_16_BITS
-	w.mix_rate = rate
-	w.stereo = false
-	w.data = data
-	return w
-
-
-func setup_audio() -> void:
-	var defs: Dictionary = {
-		"catch": tone_wav([660.0], 0.12, 0.5, 300.0, 0.0),
-		"wrong": tone_wav([170.0], 0.28, 0.6, -120.0, 0.5),
-		"done": tone_wav([523.0, 659.0, 784.0, 1047.0], 0.09, 0.5, 0.0, 0.0),
-		"heal": tone_wav([660.0, 880.0], 0.1, 0.5, 0.0, 0.0),
-		"jump": tone_wav([280.0], 0.15, 0.35, 900.0, 0.0),
-		"hit": tone_wav([130.0], 0.35, 0.7, -90.0, 0.65),
-		"warn": tone_wav([880.0], 0.13, 0.3, 0.0, 0.0),
-		"start": tone_wav([523.0, 659.0, 784.0], 0.1, 0.5, 0.0, 0.0),
-		"over": tone_wav([440.0, 370.0, 311.0, 247.0], 0.2, 0.55, -30.0, 0.0),
-	}
-	for key in defs:
-		var p := AudioStreamPlayer.new()
-		p.stream = defs[key]
-		p.volume_db = -6.0
-		add_child(p)
-		sfx_players[key] = p
-
-
 func sfx(key: String, pitch: float = 1.0) -> void:
-	var p: AudioStreamPlayer = sfx_players.get(key)
-	if p == null:
-		return
-	p.pitch_scale = pitch
-	p.play()
+	snd.play(key, pitch)
 
 
 func buzz(ms: int) -> void:
-	Input.vibrate_handheld(ms)   # на ПК ничего не делает
+	snd.buzz(ms)   # на ПК ничего не делает
+
 
 func _notification(what: int) -> void:
-	if what == NOTIFICATION_WM_GO_BACK_REQUEST \
-			or what == NOTIFICATION_APPLICATION_FOCUS_OUT \
-			or what == NOTIFICATION_APPLICATION_PAUSED:
+	if what == NOTIFICATION_WM_GO_BACK_REQUEST:
+		on_back()
+	elif what == NOTIFICATION_APPLICATION_FOCUS_OUT or what == NOTIFICATION_APPLICATION_PAUSED:
 		pause_game()
 
 
+## кнопка «Назад» на телефоне / Esc на ПК
+func on_back() -> void:
+	match state:
+		State.PLAYING:
+			pause_game()
+		State.PAUSED:
+			resume_game()
+		State.GAME_OVER:
+			if over_shown:
+				show_menu(false)
+		State.MENU:
+			if overlay != null:
+				close_overlay()
+			else:
+				get_tree().quit()
+
+
 func pause_game() -> void:
-	if state == State.PLAYING:
-		state = State.PAUSED
-		state_time = 0.0
-		touch_active = false
+	if state != State.PLAYING:
+		return
+	state = State.PAUSED
+	state_time = 0.0
+	touch_active = false
+	sfx("click")
+	var p := PauseScreen.new()
+	p.resumed.connect(resume_game)
+	p.restarted.connect(on_pause_restart)
+	p.to_menu.connect(on_pause_menu)
+	ui.add_child(p)
+	screen = p
 
 
-## вырез под камеру чтоб иконки не закрывались
+func resume_game() -> void:
+	if state != State.PAUSED:
+		return
+	clear_screens()
+	state = State.PLAYING
+	state_time = 0.0
+	touch_active = false
+	invuln_t = maxf(invuln_t, 0.6)   # короткая страховка после паузы
+	sfx("click")
+
+
+func on_pause_restart() -> void:
+	sfx("click")
+	bank_run()
+	start_shift()
+
+
+func on_pause_menu() -> void:
+	sfx("click")
+	bank_run()
+	show_menu(false)
+
+
+## сохранить рекорд и монеты текущей смены; true = новый рекорд
+func bank_run() -> bool:
+	var record: bool = SaveData.submit_score(score)
+	if run_coins > 0:
+		SaveData.add_coins(run_coins)
+	run_coins = 0
+	return record
+
+
+# ---------- экраны: меню, настройки, туториал, конец ----------
+func clear_screens() -> void:
+	if is_instance_valid(screen):
+		screen.queue_free()
+	screen = null
+	close_overlay()
+
+
+func close_overlay() -> void:
+	if is_instance_valid(overlay):
+		overlay.queue_free()
+	overlay = null
+
+
+func show_menu(instant: bool = false) -> void:
+	clear_screens()
+	reset_world()
+	state = State.MENU
+	state_time = 0.0
+	wake_t = -1.0
+	if instant:
+		snap_cam_menu()
+	else:
+		tween_cam(cam_menu_pos(), Vector2.ONE * MENU_ZOOM, 0.6)
+	var m := MenuScreen.new()
+	m.top_inset = ui_off
+	m.coins = SaveData.coins
+	m.play_pressed.connect(on_menu_play)
+	m.settings_pressed.connect(open_settings)
+	m.help_pressed.connect(open_tutorial.bind(false))
+	ui.add_child(m)
+	screen = m
+
+
+func on_menu_play() -> void:
+	if overlay != null or state != State.MENU:
+		return
+	sfx("click")
+	if SaveData.tutorial_seen:
+		begin_game_from_menu()
+	else:
+		open_tutorial(true)
+
+
+func begin_game_from_menu() -> void:
+	start_shift()
+	wake_t = 0.0   # кот просыпается и подпрыгивает
+	add_popup("!", Vector2(cat_x, catch_y() - 190.0), UIKit.GOLD)
+	tween_cam(cam_game_pos(), Vector2.ONE, 0.8)
+
+
+func open_settings() -> void:
+	if overlay != null:
+		return
+	sfx("click")
+	var s := SettingsScreen.new()
+	s.closed.connect(on_settings_closed)
+	ui.add_child(s)
+	overlay = s
+
+
+func on_settings_closed() -> void:
+	sfx("click")
+	close_overlay()
+
+
+func open_tutorial(first_run: bool) -> void:
+	if overlay != null:
+		return
+	sfx("click")
+	var t := TutorialScreen.new()
+	t.first_run = first_run
+	t.top_inset = ui_off
+	t.finished.connect(on_tutorial_finished.bind(first_run))
+	ui.add_child(t)
+	overlay = t
+
+
+func on_tutorial_finished(first_run: bool) -> void:
+	close_overlay()
+	if first_run:
+		SaveData.tutorial_seen = true
+		SaveData.save()
+		begin_game_from_menu()
+
+
+func show_game_over() -> void:
+	over_shown = true
+	var g := GameOverScreen.new()
+	g.data = {
+		"score": score,
+		"best": SaveData.best_score,
+		"new_record": over_record,
+		"orders": orders_done,
+		"combo": best_combo,
+		"coins": over_earned,
+		"total": SaveData.coins,
+	}
+	g.restarted.connect(on_over_restart)
+	g.to_menu.connect(on_over_menu)
+	ui.add_child(g)
+	screen = g
+
+
+func on_over_restart() -> void:
+	sfx("click")
+	start_shift()
+
+
+func on_over_menu() -> void:
+	sfx("click")
+	show_menu(false)
+
+
+## чистый мир для меню
+func reset_world() -> void:
+	items.clear()
+	popups.clear()
+	barrels.clear()
+	tower.clear()
+	lane = 1
+	cat_x = lane_cx(lane)
+	jump_t = -1.0
+	jump_buffer = 0.0
+	invuln_t = 0.0
+	flash_t = 0.0
+	red_t = 0.0
+	shake_t = 0.0
+	new_order()
+
+
+# ---------- камера ----------
+func cam_game_pos() -> Vector2:
+	return get_viewport_rect().size * 0.5
+
+
+func cam_menu_pos() -> Vector2:
+	var vp: Vector2 = get_viewport_rect().size
+	var y: float = minf(vp.y - MENU_CAM_BOTTOM, vp.y - vp.y / (2.0 * MENU_ZOOM))
+	return Vector2(vp.x * 0.5, y)
+
+
+func snap_cam_menu() -> void:
+	if cam_tween != null:
+		cam_tween.kill()
+	cam.zoom = Vector2.ONE * MENU_ZOOM
+	cam.position = cam_menu_pos()
+
+
+func snap_cam_game() -> void:
+	if cam_tween != null:
+		cam_tween.kill()
+	cam.zoom = Vector2.ONE
+	cam.position = cam_game_pos()
+
+
+func tween_cam(pos: Vector2, zoom_to: Vector2, time: float) -> void:
+	if cam_tween != null:
+		cam_tween.kill()
+	cam_tween = create_tween().set_parallel(true).set_trans(Tween.TRANS_QUINT).set_ease(Tween.EASE_OUT)
+	cam_tween.tween_property(cam, "zoom", zoom_to, time)
+	cam_tween.tween_property(cam, "position", pos, time)
+
+
 func update_safe_area() -> void:
 	ui_off = 0.0
 	if DEBUG_INSET > 0.0:
@@ -257,22 +473,31 @@ func top_h() -> float:
 
 
 ## инпут
+func pause_rect() -> Rect2:
+	var vp: Vector2 = get_viewport_rect().size
+	return Rect2(vp.x - 150.0, 25.0 + ui_off, 110.0, 110.0)
+
+
 func _input(event: InputEvent) -> void:
-	if state == State.PAUSED:
-		var tap_p: bool = event is InputEventScreenTouch and event.pressed
-		var key_p: bool = event is InputEventKey and event.pressed and not event.echo
-		if (tap_p or key_p) and state_time > 0.3:
-			state = State.PLAYING
-			state_time = 0.0
-		return
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_ESCAPE or event.keycode == KEY_P:
+			if state != State.MENU or overlay != null:
+				on_back()
+			return
+		if event.keycode == KEY_SPACE or event.keycode == KEY_ENTER:
+			if state == State.MENU and overlay == null:
+				on_menu_play()
+				return
+			if state == State.GAME_OVER and over_shown:
+				start_shift()
+				return
 	if state != State.PLAYING:
-		var tap: bool = event is InputEventScreenTouch and event.pressed
-		var key: bool = event is InputEventKey and event.pressed and not event.echo and (event.keycode == KEY_SPACE or event.keycode == KEY_ENTER)
-		if (tap or key) and state_time > 0.5:
-			start_shift()
 		return
 
 	if event is InputEventScreenTouch:
+		if event.pressed and pause_rect().grow(24.0).has_point(event.position):
+			pause_game()
+			return
 		touch_active = event.pressed
 		touch_done = false
 		if event.pressed:
@@ -291,7 +516,9 @@ func _input(event: InputEvent) -> void:
 				move_lane(-1)
 			KEY_RIGHT, KEY_D:
 				move_lane(1)
-			KEY_UP, KEY_W, KEY_SPACE:
+			KEY_UP, KEY_W:
+				try_jump()
+			KEY_SPACE:
 				try_jump()
 
 
@@ -309,7 +536,11 @@ func try_jump() -> void:
 
 ## состояния игры
 func start_shift() -> void:
+	clear_screens()
 	lives = START_LIVES
+	run_coins = 0
+	over_shown = false
+	wake_t = -1.0
 	score = 0
 	orders_done = 0
 	combo = 0
@@ -337,7 +568,9 @@ func start_shift() -> void:
 func end_game() -> void:
 	state = State.GAME_OVER
 	state_time = 0.0
-	best_score = maxi(best_score, score)
+	over_shown = false
+	over_earned = run_coins
+	over_record = bank_run()
 	sfx("over")
 
 
@@ -363,12 +596,16 @@ func _process(delta: float) -> void:
 	update_fx(delta)
 	if state == State.PLAYING:
 		update_game(delta)
+	elif state == State.GAME_OVER and not over_shown and state_time > 0.8:
+		show_game_over()
 	queue_redraw()
 
 
 func update_fx(delta: float) -> void:
 	cat_x = lerpf(cat_x, lane_cx(lane), 1.0 - exp(-25.0 * delta))
 	client_t += delta
+	if wake_t >= 0.0 and wake_t < WAKE_TIME:
+		wake_t += delta
 
 	if jump_t >= 0.0:
 		jump_t += delta
@@ -624,19 +861,22 @@ func complete_order() -> void:
 	var mult: int = maxi(1, mini(combo, 5))
 	var gained: int = (recipe.size() * 40 + tip) * mult
 	score += gained
+	var coin_gain: int = recipe.size() + int(tip / 20.0) + (1 if order_perfect else 0)
+	run_coins += coin_gain
 	var pool_before: int = pool_size()
 	orders_done += 1
 	if pool_size() > pool_before:
-		add_popup("NEW INGREDIENT!", Vector2(get_viewport_rect().size.x * 0.5, 650.0 + ui_off), Color("8fd3f4"))
+		add_popup("NEW INGREDIENT!", Vector2(get_viewport_rect().size.x * 0.5, 690.0 + ui_off), Color("8fd3f4"))
 	sfx("done")
 	var msg: String = "+%d" % gained
 	if mult > 1:
 		msg += "  x%d" % mult
 	add_popup(msg, Vector2(get_viewport_rect().size.x * 0.5, 470.0 + ui_off), Color("f2b705"))
+	add_popup("+%d coins" % coin_gain, Vector2(get_viewport_rect().size.x * 0.5, 540.0 + ui_off), UIKit.GOLD)
 	if order_perfect and combo > 0 and combo % HEAL_EVERY_COMBO == 0 and lives < START_LIVES:
 		lives += 1
 		sfx("heal", 1.0)
-		add_popup("+1 LIFE", Vector2(get_viewport_rect().size.x * 0.5, 560.0 + ui_off), Color("5bb98c"))
+		add_popup("+1 LIFE", Vector2(get_viewport_rect().size.x * 0.5, 620.0 + ui_off), Color("5bb98c"))
 	new_order()
 
 
@@ -695,15 +935,15 @@ func ease_out_back(x: float) -> float:
 ## отрисовка
 func _draw() -> void:
 	draw_world()
-	draw_order()
-	draw_hud()
+	if state != State.MENU:
+		draw_order()
+		draw_hud()
 	if red_t > 0.0:
 		var vp: Vector2 = get_viewport_rect().size
 		draw_rect(Rect2(-60, -60, vp.x + 120, vp.y + 120), Color(1.0, 0.1, 0.1, 0.35 * clampf(red_t / 0.25, 0.0, 1.0)))
 	for p in popups:
 		var a: float = clampf(1.0 - p.t / 0.9, 0.0, 1.0)
 		text_at(p.text, Vector2(p.pos.x - 300.0, p.pos.y), 64, Color(p.color.r, p.color.g, p.color.b, a), HORIZONTAL_ALIGNMENT_CENTER, 600.0, true)
-	draw_overlay()
 
 
 func draw_world() -> void:
@@ -713,56 +953,110 @@ func draw_world() -> void:
 	var lift: float = jump_offset()
 	var lane_w: float = vp.x / 3.0
 
-	draw_rect(Rect2(-60, -60, vp.x + 120, vp.y + 120), col_bg)
+	if bg_tex != null:
+		draw_tiled(bg_tex, Rect2(-60, -60, vp.x + 120, vp.y + 120), BG_TILE_SCALE)
+	else:
+		draw_rect(Rect2(-60, -60, vp.x + 120, vp.y + 120), col_bg)
 	for i in 3:
 		if i % 2 == 0:
 			draw_rect(Rect2(i * lane_w, top_h(), lane_w, fy - top_h()), col_lane)
-	draw_rect(Rect2(-60, fy, vp.x + 120, vp.y - fy + 60), col_floor)
+	if floor_tex != null:
+		draw_tiled(floor_tex, Rect2(-60, fy, vp.x + 120, vp.y - fy + 60), FLOOR_TILE_SCALE)
+	else:
+		draw_rect(Rect2(-60, fy, vp.x + 120, vp.y - fy + 60), col_floor)
 	if SHOW_CATCH_LINE:
 		draw_dashed_line(Vector2(0, cy), Vector2(vp.x, cy), col_line, 4.0, 16.0)
 
 	draw_barrels()
 
-	var shadow_k: float = 1.0 - lift / (JUMP_HEIGHT * 1.6)
+	var wake_lift: float = 0.0
+	if wake_t >= 0.0 and wake_t < WAKE_TIME:
+		wake_lift = 90.0 * sin(PI * wake_t / WAKE_TIME)
+	var shadow_k: float = 1.0 - (lift + wake_lift) / (JUMP_HEIGHT * 1.6)
 	draw_set_transform(Vector2(cat_x, fy), 0.0, Vector2(1.0, 0.22))
 	draw_circle(Vector2.ZERO, CAT_W * 0.55 * shadow_k, Color(0, 0, 0, 0.18))
 	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
 
-	var top: float = cy - lift
+	var top: float = cy - lift - wake_lift
 	var left_x: float = cat_x - CAT_W * 0.5
 	var cat_c: Color = col_cat.lerp(flash_col, clampf(flash_t / 0.12, 0.0, 1.0) * 0.6)
 	if invuln_t > 0.0 and int(invuln_t * 14.0) % 2 == 0:
 		cat_c.a = 0.35
 	draw_cat(left_x, top, cat_c)
+	if state == State.MENU:
+		draw_sleep_z(top)
 
 	for i in tower.size():
-		draw_ingredient(tower[i], Vector2(cat_x, top - (i + 0.5) * TOWER_STEP), ITEM_R * 0.5)
+		draw_ingredient(tower[i], Vector2(cat_x, top - TOWER_LIFT - (i + 0.5) * TOWER_STEP), ITEM_R * 0.5)
 	if state == State.PLAYING and recipe_idx < recipe.size():
 		ing_a = 0.35
-		draw_ingredient(recipe[recipe_idx], Vector2(cat_x, top - (tower.size() + 0.5) * TOWER_STEP), ITEM_R * 0.5)
+		draw_ingredient(recipe[recipe_idx], Vector2(cat_x, top - TOWER_LIFT - (tower.size() + 0.5) * TOWER_STEP), ITEM_R * 0.5)
 		ing_a = 1.0
 
 	for it in items:
 		draw_ingredient(it.kind, Vector2(lane_cx(it.lane), it.y), ITEM_R)
 
 
-func draw_cat(left_x: float, top: float, cat_c: Color) -> void:
+func draw_cat(_left_x: float, top: float, cat_c: Color) -> void:
+	var t: float = Time.get_ticks_msec() / 1000.0
+	var sleeping: bool = state == State.MENU
+	# моргание: два несовпадающих периода, чтобы не было как у метронома
+	var blinking: bool = fposmod(t, 4.3) > 4.18 or fposmod(t, 6.7) > 6.58
+	# idle-анимация: дыхание и лёгкое покачивание (во сне медленнее)
+	var br: float = sin(t * (1.4 if sleeping else 2.6))
+	var sx: float = 1.0 - 0.018 * br
+	var sy: float = 1.0 + 0.03 * br
+	var rot: float = 0.02 * sin(t * (0.8 if sleeping else 1.7))
+	# растяжение в прыжке и при пробуждении
+	var stretch: float = 0.0
+	if jump_t >= 0.0:
+		stretch = sin(PI * jump_t / JUMP_TIME)
+	elif wake_t >= 0.0 and wake_t < WAKE_TIME:
+		stretch = sin(PI * wake_t / WAKE_TIME)
+	sx -= 0.07 * stretch
+	sy += 0.12 * stretch
+
+	var feet := Vector2(cat_x, top + CAT_H + CAT_FEET_SINK)
+	draw_set_transform(feet, rot, Vector2(sx, sy))
 	if cat_tex != null:
+		# размер берём от открытого спрайта: закрытый рисуется в тот же прямоугольник, кот не "дёргается"
 		var h: float = CAT_H + CAT_SPRITE_EXTRA
 		var ts: Vector2 = cat_tex.get_size()
 		var sz: Vector2 = ts * (h / ts.y)
+		var tex: Texture2D = cat_tex
+		if (sleeping or blinking) and cat_closed_tex != null:
+			tex = cat_closed_tex
 		var tint := Color.WHITE
 		if flash_t > 0.0 and flash_col != Color.WHITE:
 			tint = Color(1.0, 0.5, 0.5)
+		elif sleeping and cat_closed_tex == null:
+			tint = Color(0.78, 0.78, 0.9)   # нет спрайта со сном: просто затемняем
 		tint.a = cat_c.a
-		var feet := Vector2(cat_x, top + CAT_H)
-		draw_texture_rect(cat_tex, Rect2(feet - Vector2(sz.x * 0.5, sz.y), sz), false, tint)
-		return
-	draw_rect(Rect2(left_x, top, CAT_W, CAT_H), cat_c)
-	draw_colored_polygon(PackedVector2Array([Vector2(left_x + 8, top), Vector2(left_x + 8, top - 36), Vector2(left_x + 48, top)]), cat_c)
-	draw_colored_polygon(PackedVector2Array([Vector2(left_x + CAT_W - 8, top), Vector2(left_x + CAT_W - 8, top - 36), Vector2(left_x + CAT_W - 48, top)]), cat_c)
-	draw_circle(Vector2(cat_x - 32, top + 60), 10, col_dark)
-	draw_circle(Vector2(cat_x + 32, top + 60), 10, col_dark)
+		draw_texture_rect(tex, Rect2(Vector2(-sz.x * 0.5, -sz.y), sz), false, tint)
+	else:
+		var c: Color = cat_c
+		if sleeping:
+			c = c.darkened(0.15)
+		var hw: float = CAT_W * 0.5
+		draw_rect(Rect2(-hw, -CAT_H, CAT_W, CAT_H), c)
+		draw_colored_polygon(PackedVector2Array([Vector2(-hw + 8, -CAT_H), Vector2(-hw + 8, -CAT_H - 36), Vector2(-hw + 48, -CAT_H)]), c)
+		draw_colored_polygon(PackedVector2Array([Vector2(hw - 8, -CAT_H), Vector2(hw - 8, -CAT_H - 36), Vector2(hw - 48, -CAT_H)]), c)
+		if sleeping or blinking:
+			draw_line(Vector2(-46, -CAT_H + 60), Vector2(-18, -CAT_H + 60), col_dark, 6.0)
+			draw_line(Vector2(18, -CAT_H + 60), Vector2(46, -CAT_H + 60), col_dark, 6.0)
+		else:
+			draw_circle(Vector2(-32, -CAT_H + 60), 10, col_dark)
+			draw_circle(Vector2(32, -CAT_H + 60), 10, col_dark)
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+
+## «Z-z-z» над спящим котом в меню
+func draw_sleep_z(top: float) -> void:
+	var t: float = Time.get_ticks_msec() / 1000.0
+	for i in 3:
+		var ph: float = fposmod(t * 0.45 + i / 3.0, 1.0)
+		var pos := Vector2(cat_x + 50.0 + ph * 70.0 + sin(ph * 6.0) * 10.0, top - 20.0 - ph * 150.0)
+		text_at("Z", pos, 40 + int(ph * 36.0), Color(1, 1, 1, sin(ph * PI)), HORIZONTAL_ALIGNMENT_LEFT, -1.0, true)
 
 
 func draw_barrels() -> void:
@@ -861,50 +1155,21 @@ func draw_hud() -> void:
 		draw_circle(Vector2(70 + h * 60, 60 + o), 22, hc)
 	text_at(str(score), Vector2(0, 88 + o), 72, Color.WHITE, HORIZONTAL_ALIGNMENT_CENTER, vp.x, false)
 	if combo >= 2:
-		text_at("x%d" % mini(combo, 5), Vector2(0, 88 + o), 64, Color("f2b705"), HORIZONTAL_ALIGNMENT_RIGHT, vp.x - 40.0, false)
-
-
-func draw_overlay() -> void:
-	if state == State.PLAYING:
-		return
-	var vp: Vector2 = get_viewport_rect().size
-	draw_rect(Rect2(-60, -60, vp.x + 120, vp.y + 120), Color(0, 0, 0, 0.6))
-	var blink := Color(1, 1, 1, 0.5 + 0.5 * pulse())
-
-	if state == State.MENU:
-		text_c("NEKOFE", 760, 150, Color.WHITE, true)
-		text_c("Catch the ingredients in order", 870, 46, Color("f2e6d0"), true)
-		text_c("Swipe left / right to move", 940, 40, Color("f2e6d0"), true)
-		text_c("Swipe up to jump over barrels", 1005, 40, Color("f2e6d0"), true)
-		if state_time > 0.5:
-			text_c("Tap to start", 1150, 64, blink, true)
-	elif state == State.PAUSED:
-		text_c("PAUSED", 900, 120, Color.WHITE, true)
-		text_c("Tap to continue", 1040, 56, blink, true)
-	else:
-		draw_rect(Rect2(110, 560, vp.x - 220, 780), Color("fffaf0"))
-		draw_rect(Rect2(110, 560, vp.x - 220, 780), col_dark, false, 8.0)
-		text_c("YOU'RE FIRED!", 690, 92, Color("e5484d"), false)
-		text_c("Score  %d" % score, 810, 68, col_dark, false)
-		text_c("Best  %d" % best_score, 890, 52, col_dark, false)
-		text_c("Orders  %d" % orders_done, 965, 52, col_dark, false)
-		text_c("Best combo  x%d" % best_combo, 1040, 52, col_dark, false)
-		if state_time > 0.5:
-			text_c("Tap for a new shift", 1230, 52, Color(0.17, 0.11, 0.08, 0.5 + 0.5 * pulse()), false)
+		text_at("x%d" % mini(combo, 5), Vector2(0, 88 + o), 64, Color("f2b705"), HORIZONTAL_ALIGNMENT_RIGHT, vp.x - 180.0, false)
+	# кнопка паузы (касание обрабатывается в _input)
+	var pr: Rect2 = pause_rect()
+	draw_rect(pr, Color(1, 1, 1, 0.12))
+	draw_rect(Rect2(pr.position + Vector2(34, 28), Vector2(16, 54)), Color.WHITE)
+	draw_rect(Rect2(pr.position + Vector2(60, 28), Vector2(16, 54)), Color.WHITE)
 
 
 func text_at(s: String, pos: Vector2, size: int, col: Color, align: HorizontalAlignment, width: float, outline: bool) -> void:
-	var f: Font = ThemeDB.fallback_font
+	var f: Font = Fonts.main()
 	if outline:
 		draw_string_outline(f, pos, s, align, width, size, int(size * 0.12), Color(0.0, 0.0, 0.0, col.a * 0.8))
 	draw_string(f, pos, s, align, width, size, col)
 
 
-func text_c(s: String, y: float, size: int, col: Color, outline: bool) -> void:
-	text_at(s, Vector2(0, y), size, col, HORIZONTAL_ALIGNMENT_CENTER, get_viewport_rect().size.x, outline)
-
-
-## 5 ингредиентов: у каждого свой цвет И своя форма
 func ca(c: Color) -> Color:
 	return Color(c.r, c.g, c.b, c.a * ing_a)
 
